@@ -2,15 +2,22 @@ from __future__ import division
 from __future__ import print_function
 
 import os
-from typing import List, Dict, Optional
+import typing
+from typing import List, Dict, Optional, Any
 import numpy as np
-import h5py
 
 import torch
 from torch import nn
 import torch.nn.functional as F
 
-
+if typing.TYPE_CHECKING:
+    try:
+        from h5py import File as H5File
+    except ImportError:
+        import warnings
+        warnings.warn(
+            "Typing: h5py installation not found, typing h5py.File as Any")
+        H5File = Any
 
 # store as a global variable, since we only support a few models for now
 models: Dict[str, Optional['CREPE']] = {
@@ -22,7 +29,7 @@ models: Dict[str, Optional['CREPE']] = {
 }
 
 
-def _get_keras_weights(weights: h5py.File, group_name: str,
+def _get_keras_weights(weights: H5File, group_name: str,
                        parameter_name: str) -> torch.Tensor:
     """Retrieve weights for a given layer's parameter
     Example usage:
@@ -88,7 +95,7 @@ class CrepeLayer(nn.Module):
         input = self.dropout(input)
         return input
 
-    def load_keras_weights(self, weights: h5py.File):
+    def load_keras_weights(self, weights: H5File):
         """Load weights from a keras pretrained layer"""
         h5_layer_name = f'conv{self.layer_index}'
 
@@ -154,7 +161,6 @@ class CREPE(nn.Module):
         self.num_filters = [f * self.capacity_multiplier
                             for f in self.num_filters_base]
 
-
         layers: List[CrepeLayer] = []
 
         # initial number of channels
@@ -188,7 +194,8 @@ class CREPE(nn.Module):
         return torch.sigmoid(input)
 
     def load_keras_weights(self, weights_path: str):
-        with h5py.File(weights_path, 'r') as f:
+        from h5py import File
+        with File(weights_path, 'r') as f:
             # load the weights for all CREPE layers
             # ignore error on next line since
             # nn.Sequential.__iter__ is not detected by mypy
