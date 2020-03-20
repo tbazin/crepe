@@ -27,3 +27,26 @@ def test_sweep():
 def test_sweep_cli():
     assert os.system("crepe {}".format(file)) == 0
     verify_f0()
+
+
+def test_sweep_torch():
+    crepe.process_file(file, backend='torch')
+    verify_f0()
+
+
+def test_activation_torch_tf():
+    try:
+        from scipy.io import wavfile
+        sr, audio = wavfile.read(file)
+    except ValueError:
+        import sys
+        print("CREPE: Could not read %s" % file, file=sys.stderr)
+        raise
+
+    *_, confidence_tf, activation_tf = crepe.predict(
+        audio, sr, backend='tf')
+    *_, confidence_torch, activation_torch = crepe.predict(
+        audio, sr, backend='tf')
+
+    assert np.allclose(confidence_tf, confidence_torch)
+    assert np.allclose(activation_tf, activation_torch)

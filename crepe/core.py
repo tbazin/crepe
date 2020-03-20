@@ -9,22 +9,25 @@ from scipy.io import wavfile
 import numpy as np
 from numpy.lib.stride_tricks import as_strided
 
+backends = ['tf', 'torch']
+
 # store as a global variable, since we only support a few models for now
-models = {
+models = {backend: {
     'tiny': None,
     'small': None,
     'medium': None,
     'large': None,
-    'full': None
+    'full': None}
+          for backend in backends
 }
 
 # the model is trained on 16kHz audio
 model_srate = 16000
 
 
-def build_and_load_model(model_capacity):
+def build_and_load_model_tf(model_capacity: str):
     """
-    Build the CNN model and load the weights
+    Build the CNN model and load the weights, using the TensorFlow backend
 
     Parameters
     ----------
@@ -39,13 +42,15 @@ def build_and_load_model(model_capacity):
     Returns
     -------
     model : tensorflow.keras.models.Model
-        The pre-trained keras model loaded in memory
+        The pre-trained model loaded in memory
     """
-    from tensorflow.keras.layers import Input, Reshape, Conv2D, BatchNormalization
-    from tensorflow.keras.layers import MaxPool2D, Dropout, Permute, Flatten, Dense
+    from tensorflow.keras.layers import (Input, Reshape, Conv2D,
+                                         BatchNormalization)
+    from tensorflow.keras.layers import (MaxPool2D, Dropout, Permute, Flatten,
+                                         Dense)
     from tensorflow.keras.models import Model
 
-    if models[model_capacity] is None:
+    if models['tf'][model_capacity] is None:
         capacity_multiplier = {
             'tiny': 4, 'small': 8, 'medium': 16, 'large': 24, 'full': 32
         }[model_capacity]
@@ -77,9 +82,41 @@ def build_and_load_model(model_capacity):
         model.load_weights(os.path.join(package_dir, filename))
         model.compile('adam', 'binary_crossentropy')
 
-        models[model_capacity] = model
+        models['tf'][model_capacity] = model
 
-    return models[model_capacity]
+
+def build_and_load_model(model_capacity: str, backend: str = 'tf'):
+    """
+    Build the CNN model and load the weights
+
+    Parameters
+    ----------
+    model_capacity : 'tiny', 'small', 'medium', 'large', or 'full'
+        String specifying the model capacity, which determines the model's
+        capacity multiplier to 4 (tiny), 8 (small), 16 (medium), 24 (large),
+        or 32 (full). 'full' uses the model size specified in the paper,
+        and the others use a reduced number of filters in each convolutional
+        layer, resulting in a smaller model that is faster to evaluate at the
+        cost of slightly reduced pitch estimation accuracy.
+
+    Returns
+    -------
+    model : tensorflow.keras.models.Model or torch.nn.Module
+        The pre-trained model loaded in memory using the chosen backend
+    """
+    if models[backend][model_capacity] is None:
+        if backend == 'tf':
+            build_and_load_model_tf(model_capacity)
+        elif backend == 'torch':
+            from .torch_backend import build_and_load_model \
+                as build_and_load_model_torch
+            model = build_and_load_model_torch(model_capacity)
+            models['torch'][model_capacity] = model
+        else:
+            raise ValueError(
+                f"Unexpected backend {backend}, possible choices are: "
+                f"{backends}")
+    return models[backend][model_capacity]
 
 
 def output_path(file, suffix, output_dir):
@@ -153,8 +190,55 @@ def to_viterbi_cents(salience):
                      range(len(observations))])
 
 
+def get_frames(audio, sr, center=True, step_size=10):
+    """Split the provided audio into frames
+
+    Parameters
+    ----------
+    audio : np.ndarray [shape=(N,) or (N, C)]
+        The audio samples. Multichannel audio will be downmixed.
+    sr : int
+        Sample rate of the audio samples. The audio will be resampled if
+        the sample rate is not 16 kHz, which is expected by the model.
+    center : boolean
+        - If `True` (default), the signal `audio` is padded so that frame
+          `D[:, t]` is centered at `audio[t * hop_length]`.
+        - If `False`, then `D[:, t]` begins at `audio[t * hop_length]`
+    step_size : int
+        The step size in milliseconds for running pitch estimation.
+
+    Returns
+    -------
+    frames : np.ndarray [shape=(T, 1024)]
+    """
+    if len(audio.shape) == 2:
+        audio = audio.mean(1)  # make mono
+    audio = audio.astype(np.float32)
+    if sr != model_srate:
+        # resample audio if necessary
+        from resampy import resample
+        audio = resample(audio, sr, model_srate)
+
+    # pad so that frames are centered around their timestamps (i.e. first frame
+    # is zero centered).
+    if center:
+        audio = np.pad(audio, 512, mode='constant', constant_values=0)
+
+    # make 1024-sample frames of the audio with hop length of 10 milliseconds
+    hop_length = int(model_srate * step_size / 1000)
+    n_frames = 1 + int((len(audio) - 1024) / hop_length)
+    frames = as_strided(audio, shape=(1024, n_frames),
+                        strides=(audio.itemsize, hop_length * audio.itemsize))
+    frames = frames.transpose().copy()
+
+    # normalize each frame -- this is expected by the model
+    frames -= np.mean(frames, axis=1)[:, np.newaxis]
+    frames /= np.std(frames, axis=1)[:, np.newaxis]
+    return frames
+
+
 def get_activation(audio, sr, model_capacity='full', center=True, step_size=10,
-                   verbose=1):
+                   verbose=1, backend: str = 'tf'):
     """
 
     Parameters
@@ -182,38 +266,17 @@ def get_activation(audio, sr, model_capacity='full', center=True, step_size=10,
     activation : np.ndarray [shape=(T, 360)]
         The raw activation matrix
     """
-    model = build_and_load_model(model_capacity)
+    model = build_and_load_model(model_capacity, backend=backend)
 
-    if len(audio.shape) == 2:
-        audio = audio.mean(1)  # make mono
-    audio = audio.astype(np.float32)
-    if sr != model_srate:
-        # resample audio if necessary
-        from resampy import resample
-        audio = resample(audio, sr, model_srate)
-
-    # pad so that frames are centered around their timestamps (i.e. first frame
-    # is zero centered).
-    if center:
-        audio = np.pad(audio, 512, mode='constant', constant_values=0)
-
-    # make 1024-sample frames of the audio with hop length of 10 milliseconds
-    hop_length = int(model_srate * step_size / 1000)
-    n_frames = 1 + int((len(audio) - 1024) / hop_length)
-    frames = as_strided(audio, shape=(1024, n_frames),
-                        strides=(audio.itemsize, hop_length * audio.itemsize))
-    frames = frames.transpose().copy()
-
-    # normalize each frame -- this is expected by the model
-    frames -= np.mean(frames, axis=1)[:, np.newaxis]
-    frames /= np.std(frames, axis=1)[:, np.newaxis]
+    frames = get_frames(audio, sr, center=center, step_size=step_size)
 
     # run prediction and convert the frequency bin weights to Hz
     return model.predict(frames, verbose=verbose)
 
 
 def predict(audio, sr, model_capacity='full',
-            viterbi=False, center=True, step_size=10, verbose=1):
+            viterbi=False, center=True, step_size=10, verbose=1,
+            backend: str = 'tf'):
     """
     Perform pitch estimation on given audio
 
@@ -254,7 +317,7 @@ def predict(audio, sr, model_capacity='full',
     """
     activation = get_activation(audio, sr, model_capacity=model_capacity,
                                 center=center, step_size=step_size,
-                                verbose=verbose)
+                                verbose=verbose, backend=backend)
     confidence = activation.max(axis=1)
 
     if viterbi:
@@ -272,7 +335,8 @@ def predict(audio, sr, model_capacity='full',
 
 def process_file(file, output=None, model_capacity='full', viterbi=False,
                  center=True, save_activation=False, save_plot=False,
-                 plot_voicing=False, step_size=10, verbose=True):
+                 plot_voicing=False, step_size=10, verbose=True,
+                 backend: str = 'tf'):
     """
     Use the input model to perform pitch estimation on the input file.
 
@@ -322,7 +386,8 @@ def process_file(file, output=None, model_capacity='full', viterbi=False,
         viterbi=viterbi,
         center=center,
         step_size=step_size,
-        verbose=1 * verbose)
+        verbose=1 * verbose,
+        backend=backend)
 
     # write prediction as TSV
     f0_file = output_path(file, ".f0.csv", output)
