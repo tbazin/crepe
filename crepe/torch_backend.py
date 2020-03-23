@@ -18,6 +18,8 @@ if typing.TYPE_CHECKING:
         warnings.warn(
             "Typing: h5py installation not found, typing h5py.File as Any")
         H5File = Any
+else:
+    H5File = Any
 
 # store as a global variable, since we only support a few models for now
 models: Dict[str, Optional['CREPE']] = {
