@@ -146,10 +146,10 @@ class CREPE(nn.Module):
             'tiny': 4, 'small': 8, 'medium': 16, 'large': 24, 'full': 32
         }
 
-    def __init__(self, model_capacity: str, frame_duration: int = 1024,
+    def __init__(self, model_capacity: str, frame_duration_n: int = 1024,
                  capacity_multiplier: Optional[int] = None):
         super().__init__()
-        self.frame_duration = frame_duration
+        self.frame_duration_n = frame_duration_n
 
         if capacity_multiplier is None:
             self.model_capacity = model_capacity
