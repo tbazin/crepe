@@ -224,8 +224,9 @@ class CREPE(nn.Module):
 
         Arguments:
             frames (np.ndarray):
-                an array of frames with shape (N_frames, self.frame_duration) or
-                (N_frames, 1, self.frame_duration)
+                an array of frames with shape
+                (N_frames, self.frame_duration_n)
+                or (N_frames, 1, self.frame_duration_n)
         Return:
             np.ndarray of shape (N_frames, 360):
                 logits for each frame over the whole cents distribution
@@ -237,7 +238,7 @@ class CREPE(nn.Module):
         self.to(device)
         frames = torch.as_tensor(frames).to(device)
 
-        parallel_model = torch.nn.DataParallel(model)
+        parallel_model = torch.nn.DataParallel(self)
         logits = parallel_model(frames).cpu().numpy()
         return logits
 
