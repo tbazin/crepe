@@ -176,8 +176,15 @@ class CREPE(nn.Module):
         # self.crepe_layers = layers
         self.layers = nn.Sequential(*layers)
 
-        num_filters_last_layer = self.num_filters[-1]
-        self.classifier = nn.Linear(num_filters_last_layer, self.num_classes)
+        # compute output dimension for classifier
+        with torch.no_grad():
+            # shape: Batch, Channels, Duration
+            dummy_input = torch.zeros(1, 1, self.frame_duration_n)
+            dummy_output = self.layers(dummy_input)
+            output_shape = dummy_output.shape[1:]
+            classifier_input_len = output_shape[0] * output_shape[1]
+
+        self.classifier = nn.Linear(classifier_input_len, self.num_classes)
 
     def forward(self, input):
         if input.ndim == 2:
