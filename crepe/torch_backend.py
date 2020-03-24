@@ -82,9 +82,8 @@ class CrepeLayer(nn.Module):
         self.layer_index = layer_index
 
         self.conv = Conv1d_samePadding(
-            in_channels, filters, stride=stride,
-            kernel_size=width,
-            padding_mode='zeros')  # TODO(theis): check padding
+            in_channels=in_channels, out_channels=filters, stride=stride,
+            kernel_size=width)
         self.batch_norm = nn.BatchNorm1d(filters)
         self.maxpool = nn.MaxPool1d(kernel_size=2, stride=None, padding=0)
         self.dropout = nn.Dropout(0.25)
