@@ -76,6 +76,7 @@ class Conv1d_samePadding(nn.Conv1d):
 
 
 class CrepeLayer(nn.Module):
+    """Define a single convolutional layer for the CREPE model"""
     def __init__(self, in_channels: int, filters: int,
                  width: int, stride: int, layer_index: int):
         super().__init__()
@@ -128,6 +129,7 @@ class CrepeLayer(nn.Module):
 
 
 class CREPE(nn.Module):
+    """Define a 6-layer CREPE pitch-prediction model"""
     # the model is trained on 16kHz audio
     fs_hz: int = 16000
 
@@ -147,10 +149,16 @@ class CREPE(nn.Module):
             'tiny': 4, 'small': 8, 'medium': 16, 'large': 24, 'full': 32
         }
 
+    # pad so that frames are centered around their timestamps (i.e. first frame
+    # is zero centered).
+    center = True
+
     def __init__(self, model_capacity: str, frame_duration_n: int = 1024,
+                 hop_length_s: float = 10e-3,
                  capacity_multiplier: Optional[int] = None):
         super().__init__()
         self.frame_duration_n = frame_duration_n
+        self.hop_length_n = int(self.fs_hz * hop_length_s)
 
         if capacity_multiplier is None:
             self.model_capacity = model_capacity
@@ -201,6 +209,65 @@ class CREPE(nn.Module):
         logits = self.classifier(input)
         return logits
 
+    def num_frames_in_samples(self, samples: torch.Tensor) -> int:
+        if self.center:
+            samples = F.pad(
+                samples,
+                [self.frame_duration_n//2, self.frame_duration_n//2],
+                mode='constant', value=0)
+        batch_size, duration_n = samples.shape[:2]
+        return batch_size * (1 + int((duration_n - self.frame_duration_n)
+                                     / self.hop_length_n))
+
+    def get_frames(self, audio, sr, center=True, step_size=10):
+        """Split the provided batch of audio samples into frames
+
+        Parameters
+        ----------
+        audio : np.ndarray [shape=(B, N,) or (B, N, C)]
+            The audio samples. Multichannel audio will be downmixed.
+        sr : int
+            Sample rate of the audio samples. The audio will be resampled if
+            the sample rate is not 16 kHz, which is expected by the model.
+        center : boolean
+            - If `True` (default), the signal `audio` is padded so that frame
+            `D[:, t]` is centered at `audio[t * hop_length]`.
+            - If `False`, then `D[:, t]` begins at `audio[t * hop_length]`
+        step_size : int
+            The step size in seconds for running pitch estimation.
+
+        Returns
+        -------
+        frames : np.ndarray [shape=(T, 1024)]
+        """
+        if len(audio.shape) == 3:
+            audio = audio.mean(-1)  # make mono
+        audio = audio.float()
+        if sr != self.fs_hz:
+            raise ValueError(f"Unexpected sampling frequency {sr}, "
+                             f"expected {self.fs_hz}")
+        # if sr != model_srate:
+        #     # resample audio if necessary
+        #     from resampy import resample
+        #     audio = resample(audio, sr, model_srate)
+
+        if self.center:
+            audio = F.pad(
+                audio,
+                [self.frame_duration_n//2, self.frame_duration_n//2],
+                mode='constant', value=0)
+
+        # must clone to remove shared memory after unfolding with overlap
+        # otherwise the normalization goes wrong
+        frames = audio.unfold(1, self.frame_duration_n, self.hop_length_n
+                              ).clone()
+        frames = frames.flatten(0, 1)
+
+        # normalize each frame -- this is expected by the model
+        frames -= frames.mean(dim=-1, keepdim=True)
+        frames /= (frames.std(dim=-1, keepdim=True) + 1e-6)
+        return frames
+
     def load_keras_weights(self, weights_path: str):
         from h5py import File
         with File(weights_path, 'r') as f:
@@ -243,6 +310,15 @@ class CREPE(nn.Module):
         logits = parallel_model(frames).cpu().numpy()
         activation = torch.sigmoid(logits)
         return activation
+
+    def make_targets(self, samples: torch.Tensor,
+                     midi_pitches: torch.IntTensor,
+                     ) -> torch.Tensor:
+        import librosa
+        targets_hz_per_sample = torch.as_tensor(
+            librosa.midi_to_hz(midi_pitches)).float()
+        n_frames_in_sample = self.num_frames_in_samples(samples[0][None])
+        return targets_hz_per_sample.repeat_interleave(n_frames_in_sample)
 
 
 def build_and_load_model(model_capacity: str):
