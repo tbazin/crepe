@@ -190,7 +190,7 @@ def to_viterbi_cents(salience):
                      range(len(observations))])
 
 
-def get_frames(audio, sr, center=True, step_size=10):
+def get_frames(audio, sr, center=True, step_size=10, normalize: bool = True):
     """Split the provided audio into frames
 
     Parameters
@@ -231,9 +231,10 @@ def get_frames(audio, sr, center=True, step_size=10):
                         strides=(audio.itemsize, hop_length * audio.itemsize))
     frames = frames.transpose().copy()
 
-    # normalize each frame -- this is expected by the model
-    frames -= np.mean(frames, axis=1)[:, np.newaxis]
-    frames /= np.std(frames, axis=1)[:, np.newaxis]
+    if normalize:
+        # normalize each frame -- this is expected by the model
+        frames = frames - frames.mean(axis=-1, keepdims=True)
+        frames = frames / (frames.std(axis=-1, keepdims=True) + 1e-6)
     return frames
 
 
