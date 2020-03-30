@@ -2,8 +2,7 @@ from __future__ import division
 from __future__ import print_function
 
 import os
-import typing
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Tuple
 import numpy as np
 
 import torch
@@ -142,13 +141,15 @@ class CREPE(nn.Module):
     # pad so that frames are centered around their timestamps (i.e. first frame
     # is zero centered).
     center = True
+    normalize_frames = True
 
     def __init__(self, model_capacity: str, frame_duration_n: int = 1024,
                  hop_length_s: float = 10e-3,
                  capacity_multiplier: Optional[int] = None):
         super().__init__()
         self.frame_duration_n = frame_duration_n
-        self.hop_length_n = int(self.fs_hz * hop_length_s)
+        self.hop_length_s = hop_length_s
+        self.hop_length_n = int(self.fs_hz * self.hop_length_s)
 
         if capacity_multiplier is None:
             self.model_capacity = model_capacity
@@ -185,6 +186,11 @@ class CREPE(nn.Module):
 
         self.classifier = nn.Linear(classifier_input_len, self.num_classes)
 
+        self.data_helper = DataHelper(self.frame_duration_n,
+                                      self.hop_length_s,
+                                      self.center,
+                                      normalize=self.normalize_frames)
+
     def forward(self, input):
         if input.ndim == 2:
             # insert channel dimension
@@ -198,65 +204,6 @@ class CREPE(nn.Module):
         input = input.flatten(start_dim=1)
         logits = self.classifier(input)
         return logits
-
-    def num_frames_in_samples(self, samples: torch.Tensor) -> int:
-        if self.center:
-            samples = F.pad(
-                samples,
-                [self.frame_duration_n//2, self.frame_duration_n//2],
-                mode='constant', value=0)
-        batch_size, duration_n = samples.shape[:2]
-        return batch_size * (1 + int((duration_n - self.frame_duration_n)
-                                     / self.hop_length_n))
-
-    def get_frames(self, audio, sr, center=True, step_size=10):
-        """Split the provided batch of audio samples into frames
-
-        Parameters
-        ----------
-        audio : np.ndarray [shape=(B, N,) or (B, N, C)]
-            The audio samples. Multichannel audio will be downmixed.
-        sr : int
-            Sample rate of the audio samples. The audio will be resampled if
-            the sample rate is not 16 kHz, which is expected by the model.
-        center : boolean
-            - If `True` (default), the signal `audio` is padded so that frame
-            `D[:, t]` is centered at `audio[t * hop_length]`.
-            - If `False`, then `D[:, t]` begins at `audio[t * hop_length]`
-        step_size : int
-            The step size in seconds for running pitch estimation.
-
-        Returns
-        -------
-        frames : np.ndarray [shape=(T, 1024)]
-        """
-        if len(audio.shape) == 3:
-            audio = audio.mean(-1)  # make mono
-        audio = audio.float()
-        if sr != self.fs_hz:
-            raise ValueError(f"Unexpected sampling frequency {sr}, "
-                             f"expected {self.fs_hz}")
-        # if sr != model_srate:
-        #     # resample audio if necessary
-        #     from resampy import resample
-        #     audio = resample(audio, sr, model_srate)
-
-        if self.center:
-            audio = F.pad(
-                audio,
-                [self.frame_duration_n//2, self.frame_duration_n//2],
-                mode='constant', value=0)
-
-        # must clone to remove shared memory after unfolding with overlap
-        # otherwise the normalization goes wrong
-        frames = audio.unfold(1, self.frame_duration_n, self.hop_length_n
-                              ).clone()
-        frames = frames.flatten(0, 1)
-
-        # normalize each frame -- this is expected by the model
-        frames -= frames.mean(dim=-1, keepdim=True)
-        frames /= (frames.std(dim=-1, keepdim=True) + 1e-6)
-        return frames
 
     def load_keras_weights(self, weights_path: str):
         from h5py import File
@@ -276,7 +223,7 @@ class CREPE(nn.Module):
     @torch.no_grad()
     def predict(self, frames: np.ndarray, **kwargs
                 ) -> np.ndarray:
-        """Return predicted activation for the provided frames.
+        """Return predicted logits for the provided frames.
 
         Provided for duck-typing with the TensorFlow backend.
 
@@ -298,15 +245,162 @@ class CREPE(nn.Module):
 
         parallel_model = torch.nn.DataParallel(self)
         logits = parallel_model(frames).cpu().numpy()
-        activation = torch.sigmoid(logits)
-        return activation
+        return logits
+
+    def forward_audio(self, audio: torch.Tensor) -> torch.Tensor:
+        """Helper function for computation on batched audio samples
+
+        Input arguments:
+            audio, torch.Tensor, shape [Batch, Time, Channels]
+            sr, int:
+                the sample rate of the audios, in Hz
+            center, bool, optional (default True):
+                whether to use frames centered on their timestamps
+                for analysis (if True, pads the input audio accordingly)
+            step_size, int, optional (default 10):
+                step size for extracting the frames
+            """
+        batch_size = audio.shape[0]
+        frames = self.data_helper.get_frames(audio)
+        frames = frames.flatten(0, 1)
+        logits = self.forward(frames)
+        # reshape as (Batch, Num_frames_in_sample, Num_classes)
+        return logits.unsqueeze(0).view(batch_size, -1,
+                                        self.num_classes)
+
+
+class DataHelper(nn.Module):
+    fs_hz: int = 16000
+    n_classes: int = 360
+    a4_frequency_hz: float = 440
+
+    def __init__(self, frame_duration_n: int, hop_length_s: float,
+                 center: bool, normalize: bool):
+        super().__init__()
+        self.frame_duration_n = frame_duration_n
+        self.hop_length_s = hop_length_s
+        self.hop_length_n = int(self.hop_length_s * self.fs_hz)
+        self.center = center
+        self.normalize = normalize
+
+        self._padding_width = 4
+        self._pad = nn.ConstantPad1d(self._padding_width, 0)
+        self.to_local_average_cents_matrix_padded = nn.Parameter(
+            self._pad(torch.linspace(0, 7180, self.n_classes)
+                      + 1997.3794084376191),
+            requires_grad=False)
+        self.relative_window_indexes = nn.Parameter(
+            torch.arange(-4, 5).unsqueeze(0),
+            requires_grad=False)
+
+    def to_local_average_cents(self, salience: torch.Tensor, center=None):
+        # will not mess up the subsequent argmax since the salience is > 0
+        salience = self._pad(salience)
+
+        if center is None:
+            center = torch.argmax(salience, dim=-1, keepdim=True)
+
+        window_indexes = (center + self.relative_window_indexes)
+        # extract window of salience values over most salient pitch
+        salience = salience.gather(-1, window_indexes)
+
+        product_sum = torch.sum(
+            salience
+            * (self.to_local_average_cents_matrix_padded
+               .expand(*window_indexes.shape[:-1], -1)
+               .gather(-1, window_indexes)),
+            dim=-1)
+        weight_sum = salience.sum(-1)
+
+        average_cents = product_sum / weight_sum
+        return average_cents
+
+    def cents_to_hz(self, cents: torch.Tensor):
+        frequency = 10 * 2 ** (cents / 1200)  # type: ignore
+        frequency[torch.isnan(frequency)] = 0
+        return frequency
+
+    def get_timestamps_tensor(self,  batch_size: int, duration_n: int,
+                              ) -> torch.Tensor:
+        return ((torch.arange(duration_n) * self.hop_length_s)
+                .unsqueeze(0)
+                .expand(batch_size, -1))
+
+    def get_timestamps_tensor_like(self, input: torch.Tensor,
+                                   ) -> torch.Tensor:
+        return self.get_timestamps_tensor(*input.shape[:2])
+
+    def interpret_activation(self, logits: torch.Tensor
+                             ) -> Tuple[torch.Tensor, torch.Tensor,
+                                        torch.Tensor]:
+        confidence = logits.max(dim=-1)[0]
+
+        cents = self.to_local_average_cents(logits)
+        frequency = self.cents_to_hz(cents)
+
+        time = self.get_timestamps_tensor_like(logits)
+        return time, frequency, confidence
+
+    def num_frames_in_samples(self, samples: torch.Tensor) -> int:
+        if self.center:
+            samples = F.pad(
+                samples,
+                [self.frame_duration_n//2, self.frame_duration_n//2],
+                mode='constant', value=0)
+        batch_size, duration_n = samples.shape[:2]
+        return batch_size * (1 + int((duration_n - self.frame_duration_n)
+                                     / self.hop_length_n))
+
+    def get_frames(self, audio: torch.Tensor) -> torch.Tensor:
+        """Split the provided batch of audio samples into frames
+
+        Parameters
+        ----------
+        audio : np.ndarray [shape=(B, N,) or (B, N, C)]
+            The audio samples. Multichannel audio will be downmixed.
+        sr : int
+            Sample rate of the audio samples. The audio will be resampled if
+            the sample rate is not 16 kHz, which is expected by the model.
+        center : boolean
+            - If `True` (default), the signal `audio` is padded so that frame
+            `D[:, t]` is centered at `audio[t * hop_length]`.
+            - If `False`, then `D[:, t]` begins at `audio[t * hop_length]`
+        step_size : int
+            The step size in seconds for running pitch estimation.
+
+        Returns
+        -------
+        frames : np.ndarray [shape=(B, T, 1024)]
+        """
+        if len(audio.shape) == 3:
+            audio = audio.mean(-1)  # make mono
+        audio = audio.float()
+
+        if self.center:
+            audio = F.pad(
+                audio,
+                [self.frame_duration_n//2, self.frame_duration_n//2],
+                mode='constant', value=0)
+
+        # must clone to remove shared memory after unfolding with overlap
+        # otherwise the normalization goes wrong
+        frames = audio.unfold(-1, self.frame_duration_n, self.hop_length_n
+                              ).clone()
+
+        # normalize each frame -- this is expected by the model
+        if self.normalize:
+            frames = frames - frames.mean(dim=-1, keepdim=True)
+            frames = frames / (frames.std(dim=-1, keepdim=True) + 1e-6)
+        return frames
+
+    def midi_to_hz(self, midi_pitches: torch.IntTensor) -> torch.Tensor:
+        return self.a4_frequency_hz * (  # type: ignore
+            2.0 ** ((midi_pitches - 69.0)/12.0))  # type: ignore
 
     def make_targets(self, samples: torch.Tensor,
                      midi_pitches: torch.IntTensor,
                      ) -> torch.Tensor:
-        import librosa
-        targets_hz_per_sample = torch.as_tensor(
-            librosa.midi_to_hz(midi_pitches)).float()
+        targets_hz_per_sample = self.midi_to_hz(midi_pitches)
         n_frames_in_sample = self.num_frames_in_samples(samples[0][None])
         return targets_hz_per_sample.repeat_interleave(n_frames_in_sample)
 
