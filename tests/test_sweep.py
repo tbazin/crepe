@@ -45,8 +45,13 @@ def test_activation_torch_tf():
 
     *_, confidence_tf, activation_tf = crepe.predict(
         audio, sr, backend='tf')
+
+    import torch
+    audio = torch.as_tensor(audio).unsqueeze(0)
+    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    audio = audio.to(device)
     *_, confidence_torch, activation_torch = crepe.predict(
-        audio, sr, backend='tf')
+        audio, sr, backend='torch')
 
     assert np.allclose(confidence_tf, confidence_torch)
     assert np.allclose(activation_tf, activation_torch)
