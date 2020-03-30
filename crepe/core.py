@@ -150,7 +150,7 @@ def to_local_average_cents(salience, center=None):
         return product_sum / weight_sum
     if salience.ndim == 2:
         return np.array([to_local_average_cents(salience[i, :]) for i in
-                         range(salience.shape[0])])
+                        range(salience.shape[0])])
 
     raise Exception("label should be either 1d or 2d ndarray")
 
@@ -227,8 +227,10 @@ def get_frames(audio, sr, center=True, step_size=10, normalize: bool = True):
     hop_length = int(model_srate * step_size / 1000)
     n_frames = 1 + int((len(audio) - 1024) / hop_length)
     frames = as_strided(audio, shape=(1024, n_frames),
-                        strides=(audio.itemsize, hop_length * audio.itemsize))
-    frames = frames.transpose().copy()
+                        strides=(audio.itemsize, hop_length * audio.itemsize),
+                        writeable=False
+                        ).copy()
+    frames = frames.transpose()
 
     if normalize:
         # normalize each frame -- this is expected by the model
@@ -268,10 +270,21 @@ def get_activation(audio, sr, model_capacity='full', center=True, step_size=10,
     """
     model = build_and_load_model(model_capacity, backend=backend)
 
-    frames = get_frames(audio, sr, center=center, step_size=step_size)
+    if backend == 'torch':
+        assert center == model.center
+        assert step_size == 1000 * model.hop_length_s
+        if sr != model.fs_hz:
+            raise NotImplementedError(
+                "Resampling not supported in Torch backend")
 
-    # run prediction and convert the frequency bin weights to Hz
-    return model.predict(frames, verbose=verbose)
+        import torch
+        model.eval()
+        with torch.no_grad():
+            return model.forward_audio(audio)
+    elif backend == 'tf':
+        frames = get_frames(audio, sr, center=center, step_size=step_size)
+        # run prediction and convert the frequency bin weights to Hz
+        return model.predict(frames, verbose=verbose)
 
 
 def predict(audio, sr, model_capacity='full',
@@ -318,17 +331,25 @@ def predict(audio, sr, model_capacity='full',
     activation = get_activation(audio, sr, model_capacity=model_capacity,
                                 center=center, step_size=step_size,
                                 verbose=verbose, backend=backend)
-    confidence = activation.max(axis=1)
+    if backend == 'tf':
+        confidence = activation.max(axis=1)
 
-    if viterbi:
-        cents = to_viterbi_cents(activation)
-    else:
-        cents = to_local_average_cents(activation)
+        if viterbi:
+            cents = to_viterbi_cents(activation)
+        else:
+            cents = to_local_average_cents(activation)
 
-    frequency = 10 * 2 ** (cents / 1200)
-    frequency[np.isnan(frequency)] = 0
+        frequency = 10 * 2 ** (cents / 1200)
+        frequency[np.isnan(frequency)] = 0
 
-    time = np.arange(confidence.shape[0]) * step_size / 1000.0
+        time = np.arange(confidence.shape[0]) * step_size / 1000.0
+    elif backend == 'torch':
+        if viterbi:
+            raise NotImplementedError(
+                "Viterbi decoding not yet implemented in PyTorch")
+        model = build_and_load_model(model_capacity, 'torch')
+        time, frequency, confidence = model.data_helper.interpret_activation(
+            activation)
 
     return time, frequency, confidence, activation
 
@@ -380,14 +401,30 @@ def process_file(file, output=None, model_capacity='full', viterbi=False,
         print("CREPE: Could not read %s" % file, file=sys.stderr)
         raise
 
+    if backend == 'torch':
+        import torch
+        # batch input
+        audio = torch.as_tensor(audio).unsqueeze(0)
+        # send to GPU if available
+        device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+        audio = audio.to(device)
+
     time, frequency, confidence, activation = predict(
         audio, sr,
         model_capacity=model_capacity,
-        viterbi=viterbi,
         center=center,
+        viterbi=viterbi,
         step_size=step_size,
         verbose=1 * verbose,
         backend=backend)
+
+    if backend == 'torch':
+        time, frequency, confidence, activation = (
+            time[0].cpu().numpy(),
+            frequency[0].cpu().numpy(),
+            confidence[0].cpu().numpy(),
+            activation[0].cpu().numpy()
+        )
 
     # write prediction as TSV
     f0_file = output_path(file, ".f0.csv", output)
@@ -428,4 +465,3 @@ def process_file(file, output=None, model_capacity='full', viterbi=False,
         imwrite(plot_file, (255 * image).astype(np.uint8))
         if verbose:
             print("CREPE: Saved the salience plot at {}".format(plot_file))
-
