@@ -9,17 +9,7 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-
-if typing.TYPE_CHECKING:
-    try:
-        from h5py import File as H5File
-    except ImportError:
-        import warnings
-        warnings.warn(
-            "Typing: h5py installation not found, typing h5py.File as Any")
-        H5File = Any
-else:
-    H5File = Any
+import h5py
 
 # store as a global variable, since we only support a few models for now
 models: Dict[str, Optional['CREPE']] = {
@@ -31,7 +21,7 @@ models: Dict[str, Optional['CREPE']] = {
 }
 
 
-def _get_keras_weights(weights: H5File, group_name: str,
+def _get_keras_weights(weights: h5py.File, group_name: str,
                        parameter_name: str) -> torch.Tensor:
     """Retrieve weights for a given layer's parameter
     Example usage:
@@ -97,7 +87,7 @@ class CrepeLayer(nn.Module):
         input = self.dropout(input)
         return input
 
-    def load_keras_weights(self, weights: H5File):
+    def load_keras_weights(self, weights: h5py.File):
         """Load weights from a keras pretrained layer"""
         h5_layer_name = f'conv{self.layer_index}'
 
