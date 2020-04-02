@@ -199,8 +199,8 @@ class CREPE(nn.Module):
         # convert to logits
         input = input.transpose(1, 2)
         input = input.flatten(start_dim=1)
-        input = self.classifier(input)
-        return torch.sigmoid(input)
+        logits = self.classifier(input)
+        return logits
 
     def load_keras_weights(self, weights_path: str):
         from h5py import File
@@ -220,7 +220,7 @@ class CREPE(nn.Module):
     @torch.no_grad()
     def predict(self, frames: np.ndarray, **kwargs
                 ) -> np.ndarray:
-        """Return predicted logits for the provided frames.
+        """Return predicted activation for the provided frames.
 
         Provided for duck-typing with the TensorFlow backend.
 
@@ -242,7 +242,8 @@ class CREPE(nn.Module):
 
         parallel_model = torch.nn.DataParallel(self)
         logits = parallel_model(frames).cpu().numpy()
-        return logits
+        activation = torch.sigmoid(logits)
+        return activation
 
 
 def build_and_load_model(model_capacity: str):
