@@ -259,7 +259,7 @@ class CREPE(nn.Module):
                 for analysis (if True, pads the input audio accordingly)
             step_size, int, optional (default 10):
                 step size for extracting the frames
-            """
+        """
         batch_size = audio.shape[0]
         frames = self.data_helper.get_frames(audio)
         frames = frames.flatten(0, 1)
@@ -271,8 +271,10 @@ class CREPE(nn.Module):
 
 class DataHelper(nn.Module):
     fs_hz: int = 16000
-    n_classes: int = 360
+    num_bins_cents: int = 360
     a4_frequency_hz: float = 440
+    cents_reference_frequency_hz: float = 10
+    cents_gaussian_bluring_std_cents: float = 25
 
     def __init__(self, frame_duration_n: int, hop_length_s: float,
                  center: bool, normalize: bool):
@@ -285,11 +287,10 @@ class DataHelper(nn.Module):
 
         self._padding_width = 4
         self._pad = nn.ConstantPad1d(self._padding_width, 0)
-        self.to_local_average_cents_matrix_padded = nn.Parameter(
-            self._pad(torch.linspace(0, 7180, self.n_classes)
-                      + 1997.3794084376191),
+        self._to_local_average_cents_matrix = nn.Parameter(
+            torch.linspace(0, 7180, self.num_bins_cents) + 1997.3794084376191,
             requires_grad=False)
-        self.relative_window_indexes = nn.Parameter(
+        self._relative_window_indexes = nn.Parameter(
             torch.arange(-4, 5).unsqueeze(0),
             requires_grad=False)
 
@@ -300,13 +301,13 @@ class DataHelper(nn.Module):
         if center is None:
             center = torch.argmax(salience, dim=-1, keepdim=True)
 
-        window_indexes = (center + self.relative_window_indexes)
+        window_indexes = (center + self._relative_window_indexes)
         # extract window of salience values over most salient pitch
         salience = salience.gather(-1, window_indexes)
 
         product_sum = torch.sum(
             salience
-            * (self.to_local_average_cents_matrix_padded
+            * (self._pad(self._to_local_average_cents_matrix)
                .expand(*window_indexes.shape[:-1], -1)
                .gather(-1, window_indexes)),
             dim=-1)
@@ -315,10 +316,35 @@ class DataHelper(nn.Module):
         average_cents = product_sum / weight_sum
         return average_cents
 
-    def cents_to_hz(self, cents: torch.Tensor):
-        frequency = 10 * 2 ** (cents / 1200)  # type: ignore
-        frequency[torch.isnan(frequency)] = 0
-        return frequency
+    def cents_to_hz(self, cents: torch.Tensor) -> torch.Tensor:
+        """Convert frequencies in cents to hertz"""
+        hertz = self.cents_reference_frequency_hz * (
+            2 ** (cents / 1200))  # type: ignore
+        hertz[torch.isnan(hertz)] = 0
+        return hertz
+
+    def hertz_to_cents(self, hertz: torch.Tensor) -> torch.Tensor:
+        """Convert frequencies in hertz to cents"""
+        cents = 1200 * torch.log2(hertz / self.cents_reference_frequency_hz)
+        return cents
+
+    def cents_to_bins(self, cents: torch.Tensor) -> torch.Tensor:
+        """Map frequencies in cents onto the self.num_bins_cents bins
+
+        Performs unnormalized local Gaussian bluring of the bins
+
+        Input argument:
+            cents, torch.Tensor
+
+        Return:
+            torch.Tensor with an added dimension of size
+                `self.num_bins_cents`
+        """
+        bins_center_distance = (
+            self._to_local_average_cents_matrix - cents.unsqueeze(-1))
+        # unnormalized gaussian as described in the original CREPE paper
+        return torch.exp((- bins_center_distance ** 2) /
+                         (2 * self.cents_gaussian_bluring_std_cents ** 2))
 
     def get_timestamps_tensor(self,  batch_size: int, duration_n: int,
                               ) -> torch.Tensor:
@@ -397,12 +423,18 @@ class DataHelper(nn.Module):
         return self.a4_frequency_hz * (  # type: ignore
             2.0 ** ((midi_pitches - 69.0)/12.0))  # type: ignore
 
-    def make_targets(self, samples: torch.Tensor,
-                     midi_pitches: torch.IntTensor,
+    def make_targets(self, samples: torch.Tensor, pitches_midi: torch.IntTensor
                      ) -> torch.Tensor:
-        targets_hz_per_sample = self.midi_to_hz(midi_pitches)
+        pitches_hz = self.midi_to_hz(pitches_midi)
+        pitches_cents = self.hertz_to_cents(pitches_hz)
+        pitches_cents_bins = self.cents_to_bins(pitches_cents)
+
         n_frames_in_sample = self.num_frames_in_samples(samples[0][None])
-        return targets_hz_per_sample.repeat_interleave(n_frames_in_sample)
+        batch_size = samples.shape[0]
+        pitches_cents_bins_per_frame = (
+            pitches_cents_bins.unsqueeze(1).expand(
+                batch_size, n_frames_in_sample, -1)).clone()
+        return pitches_cents_bins_per_frame
 
 
 def build_and_load_model(model_capacity: str):
