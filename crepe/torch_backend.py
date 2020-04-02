@@ -223,7 +223,7 @@ class CREPE(nn.Module):
     @torch.no_grad()
     def predict(self, frames: np.ndarray, **kwargs
                 ) -> np.ndarray:
-        """Return predicted logits for the provided frames.
+        """Return predicted activation for the provided frames.
 
         Provided for duck-typing with the TensorFlow backend.
 
@@ -245,7 +245,8 @@ class CREPE(nn.Module):
 
         parallel_model = torch.nn.DataParallel(self)
         logits = parallel_model(frames).cpu().numpy()
-        return logits
+        activation = torch.sigmoid(logits)
+        return activation
 
     def forward_audio(self, audio: torch.Tensor) -> torch.Tensor:
         """Helper function for computation on batched audio samples
