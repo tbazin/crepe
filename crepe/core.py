@@ -270,7 +270,11 @@ def get_activation(audio, sr, model_capacity='full', center=True, step_size=10,
     """
     model = build_and_load_model(model_capacity, backend=backend)
 
-    if backend == 'torch':
+    if backend == 'tf':
+        frames = get_frames(audio, sr, center=center, step_size=step_size)
+        # run prediction and convert the frequency bin weights to Hz
+        return model.predict(frames, verbose=verbose)
+    elif backend == 'torch':
         assert center == model.center
         assert step_size == 1000 * model.hop_length_s
         if sr != model.fs_hz:
@@ -281,10 +285,6 @@ def get_activation(audio, sr, model_capacity='full', center=True, step_size=10,
         model.eval()
         with torch.no_grad():
             return model.forward_audio(audio)
-    elif backend == 'tf':
-        frames = get_frames(audio, sr, center=center, step_size=step_size)
-        # run prediction and convert the frequency bin weights to Hz
-        return model.predict(frames, verbose=verbose)
 
 
 def predict(audio, sr, model_capacity='full',
