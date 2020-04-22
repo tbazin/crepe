@@ -276,6 +276,8 @@ class DataHelper(nn.Module):
     a4_frequency_hz: float = 440
     cents_reference_frequency_hz: float = 10
     cents_gaussian_bluring_std_cents: float = 25
+    # as used in the original CREPE repository
+    local_averaging_window_relative_length: int = 4
 
     def __init__(self, frame_duration_n: int, hop_length_s: float,
                  center: bool, normalize: bool):
@@ -291,9 +293,6 @@ class DataHelper(nn.Module):
         self._to_local_average_cents_matrix = nn.Parameter(
             torch.linspace(0, 7180, self.num_bins_cents) + 1997.3794084376191,
             requires_grad=False)
-        self._relative_window_indexes = nn.Parameter(
-            torch.arange(-4, 5).unsqueeze(0),
-            requires_grad=False)
 
     def to_local_average_cents(self, salience: torch.Tensor, center=None):
         # will not mess up the subsequent argmax since the salience is > 0
@@ -302,7 +301,14 @@ class DataHelper(nn.Module):
         if center is None:
             center = torch.argmax(salience, dim=-1, keepdim=True)
 
-        window_indexes = (center + self._relative_window_indexes)
+        relative_window_indexes = (
+            torch.arange(
+                -self.local_averaging_window_relative_length,
+                self.local_averaging_window_relative_length + 1)
+            .unsqueeze(0)
+            .to(center.device)
+            )
+        window_indexes = (center + relative_window_indexes)
         # extract window of salience values over most salient pitch
         salience = salience.gather(-1, window_indexes)
 
