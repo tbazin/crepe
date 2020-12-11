@@ -10,7 +10,8 @@ from .core import process_file
 
 def run(filename, output=None, model_capacity='full', viterbi=False,
         save_activation=False, save_plot=False, plot_voicing=False,
-        no_centering=False, step_size=10, verbose=True):
+        no_centering=False, step_size=10, verbose=True,
+        backend: str = 'tf'):
     """
     Collect the WAV files to process and run the model
 
@@ -82,7 +83,8 @@ def run(filename, output=None, model_capacity='full', viterbi=False,
                      save_plot=save_plot,
                      plot_voicing=plot_voicing,
                      step_size=step_size,
-                     verbose=verbose)
+                     verbose=verbose,
+                     backend=backend)
 
 
 def positive_int(value):
@@ -131,6 +133,10 @@ def main():
                         help='String specifying the model capacity; smaller '
                              'models are faster to compute, but may yield '
                              'less accurate pitch estimation')
+    parser.add_argument('--backend', '-b', default='tf',
+                        choices=['tf', 'torch'],
+                        help='String specifying the deep-learning backend for '
+                             'the models')
     parser.add_argument('--viterbi', '-V', action='store_true',
                         help='perform Viterbi decoding to smooth the pitch '
                              'curve')
@@ -170,4 +176,5 @@ def main():
         plot_voicing=args.plot_voicing,
         no_centering=args.no_centering,
         step_size=args.step_size,
-        verbose=not args.quiet)
+        verbose=not args.quiet,
+        backend=args.backend)

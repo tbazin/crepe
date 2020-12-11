@@ -22,3 +22,6 @@ build
 
 crepe/model-*.h5
 crepe/model-*.h5.bz2
+
+.mypy_cache/
+.vscode/
