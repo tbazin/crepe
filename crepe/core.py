@@ -282,6 +282,13 @@ def get_activation(audio, sr, model_capacity='full', center=True, step_size=10,
                 "Resampling not supported in Torch backend")
 
         import torch
+
+        audio = torch.from_numpy(audio)
+        if len(audio.shape) < 2:
+            audio = audio.view((1, -1))
+        device = next(iter(model.parameters())).device
+        audio = audio.to(device)
+
         model.eval()
         with torch.no_grad():
             logits = model.forward_audio(audio)
@@ -403,14 +410,6 @@ def process_file(file, output=None, model_capacity='full', viterbi=False,
     except ValueError:
         print("CREPE: Could not read %s" % file, file=sys.stderr)
         raise
-
-    if backend == 'torch':
-        import torch
-        # batch input
-        audio = torch.as_tensor(audio).unsqueeze(0)
-        # send to GPU if available
-        device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-        audio = audio.to(device)
 
     time, frequency, confidence, activation = predict(
         audio, sr,
