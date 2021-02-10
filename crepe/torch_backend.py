@@ -4,6 +4,7 @@ from __future__ import print_function
 import os
 from typing import List, Dict, Optional, Tuple
 import numpy as np
+import tqdm
 
 import torch
 from torch import nn
@@ -11,8 +12,6 @@ from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import h5py
 from crepe.core import get_frames
-
-from ipdb import set_trace
 
 # store as a global variable, since we only support a few models for now
 models: Dict[str, Optional["CREPE"]] = {
@@ -211,13 +210,6 @@ class CREPE(nn.Module):
 
         self.classifier = nn.Linear(classifier_input_len, self.num_classes)
 
-        # self.data_helper = DataHelper(
-        #     self.frame_duration_n,
-        #     self.hop_length_s,
-        #     self.center,
-        #     normalize=self.normalize_frames,
-        # )
-
     def forward(self, input):
         if input.ndim == 2:
             # insert channel dimension
@@ -237,16 +229,20 @@ class CREPE(nn.Module):
         if len(frames.shape) == 2:
             frames = np.expand_dims(frames, 1)
 
-        dev = next(iter(self.parameters()))
+        dev = next(iter(self.parameters())).device
 
         batch_size = 32
-        pin_mem = dev.name != "cpu"
+        # pin_mem = dev.type == "cuda"
+        # data_loader = DataLoader(
+        #     frames, batch_size=batch_size, shuffle=False, pin_memory=pin_mem
+        # )
         data_loader = DataLoader(
-            frames, batch_size=batch_size, shuffle=False, pin_memory=pin_mem
+            torch.as_tensor(frames).to(dev), batch_size=batch_size, shuffle=False
         )
         output = []
-        for batch in data_loader:
-            output.append(self.forward(batch.to(dev)))
+        for batch in tqdm.tqdm(data_loader):
+            # output.append(self.forward(batch.to(dev)))
+            output.append(self.forward(batch))
         logits = torch.cat(output)
         activation = torch.sigmoid(logits)
         return activation.cpu().numpy()
@@ -266,216 +262,6 @@ class CREPE(nn.Module):
                 f, "classifier", "kernel"
             ).t()
             self.classifier.bias.data = _get_keras_weights(f, "classifier", "bias")
-
-
-# class DataHelper(nn.Module):
-#     fs_hz: int = 16000
-#     num_bins_cents: int = 360
-#     a4_frequency_hz: float = 440
-#     cents_reference_frequency_hz: float = 10
-#     cents_gaussian_bluring_std_cents: float = 25
-#     # as used in the original CREPE repository
-#     local_averaging_window_relative_length: int = 4
-
-#     def __init__(
-#         self, frame_duration_n: int, hop_length_s: float, center: bool, normalize: bool
-#     ):
-#         super().__init__()
-#         self.frame_duration_n = frame_duration_n
-#         self.hop_length_s = hop_length_s
-#         self.hop_length_n = int(self.hop_length_s * self.fs_hz)
-#         self.center = center
-#         self.normalize = normalize
-
-#         self._padding_width = 4
-#         self._pad = nn.ConstantPad1d(self._padding_width, 0)
-#         self._to_local_average_cents_matrix = nn.Parameter(
-#             torch.linspace(0, 7180, self.num_bins_cents) + 1997.3794084376191,
-#             requires_grad=False,
-#         )
-
-#     def to_local_average_cents(self, salience: torch.Tensor, center=None):
-#         # will not mess up the subsequent argmax since the salience is > 0
-#         salience = self._pad(salience)
-
-#         if center is None:
-#             center = torch.argmax(salience, dim=-1, keepdim=True)
-
-#         relative_window_indexes = (
-#             torch.arange(
-#                 -self.local_averaging_window_relative_length,
-#                 self.local_averaging_window_relative_length + 1,
-#             )
-#             .unsqueeze(0)
-#             .to(center.device)
-#         )
-#         window_indexes = center + relative_window_indexes
-#         # extract window of salience values over most salient pitch
-#         salience = salience.gather(-1, window_indexes)
-
-#         product_sum = torch.sum(
-#             salience
-#             * (
-#                 self._pad(self._to_local_average_cents_matrix)
-#                 .expand(*window_indexes.shape[:-1], -1)
-#                 .gather(-1, window_indexes)
-#             ),
-#             dim=-1,
-#         )
-#         weight_sum = salience.sum(-1)
-
-#         average_cents = product_sum / weight_sum
-#         return average_cents
-
-#     def cents_to_hz(self, cents: torch.Tensor) -> torch.Tensor:
-#         """Convert frequencies in cents to hertz"""
-#         hertz = self.cents_reference_frequency_hz * (
-#             2 ** (cents / 1200)
-#         )  # type: ignore
-#         hertz[torch.isnan(hertz)] = 0
-#         return hertz
-
-#     def hertz_to_cents(self, hertz: torch.Tensor) -> torch.Tensor:
-#         """Convert frequencies in hertz to cents"""
-#         cents = 1200 * torch.log2(hertz / self.cents_reference_frequency_hz)
-#         return cents
-
-#     def cents_to_bins(self, cents: torch.Tensor) -> torch.Tensor:
-#         """Map frequencies in cents onto the self.num_bins_cents bins
-
-#         Performs unnormalized local Gaussian bluring of the bins
-
-#         Input argument:
-#             cents, torch.Tensor
-
-#         Return:
-#             torch.Tensor with an added dimension of size
-#                 `self.num_bins_cents`
-#         """
-#         bins_center_distance = self._to_local_average_cents_matrix - cents.unsqueeze(-1)
-#         # unnormalized gaussian as described in the original CREPE paper
-#         return torch.exp(
-#             (-(bins_center_distance ** 2))
-#             / (2 * self.cents_gaussian_bluring_std_cents ** 2)
-#         )
-
-#     def get_timestamps_tensor(
-#         self,
-#         batch_size: int,
-#         duration_n: int,
-#     ) -> torch.Tensor:
-#         return (
-#             (torch.arange(duration_n) * self.hop_length_s)
-#             .unsqueeze(0)
-#             .expand(batch_size, -1)
-#         )
-
-#     def get_timestamps_tensor_like(
-#         self,
-#         input: torch.Tensor,
-#     ) -> torch.Tensor:
-#         return self.get_timestamps_tensor(*input.shape[:2])
-
-#     def interpret_activation(
-#         self, logits: torch.Tensor
-#     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-#         confidence = logits.max(dim=-1)[0]
-
-#         cents = self.to_local_average_cents(logits)
-#         frequency = self.cents_to_hz(cents)
-
-#         time = self.get_timestamps_tensor_like(logits)
-#         return time, frequency, confidence
-
-#     def num_frames_in_samples(self, samples: torch.Tensor) -> int:
-#         if self.center:
-#             samples = F.pad(
-#                 samples,
-#                 [self.frame_duration_n // 2, self.frame_duration_n // 2],
-#                 mode="constant",
-#                 value=0,
-#             )
-#         batch_size, duration_n = samples.shape[:2]
-#         return batch_size * (
-#             1 + int((duration_n - self.frame_duration_n) / self.hop_length_n)
-#         )
-
-#     def prepare_audio(self, audio: torch.Tensor) -> torch.Tensor:
-#         if len(audio.shape) == 3:
-#             audio = audio.mean(-1)  # make mono
-#         audio = audio.float()
-
-#         if self.center:
-#             audio = F.pad(
-#                 audio,
-#                 [self.frame_duration_n // 2, self.frame_duration_n // 2],
-#                 mode="constant",
-#                 value=0,
-#             )
-
-#         return audio
-
-#     def get_frames(self, audio: torch.Tensor) -> torch.Tensor:
-#         """Split the provided batch of audio samples into frames
-
-#         Parameters
-#         ----------
-#         audio : np.ndarray [shape=(B, N,) or (B, N, C)]
-#             The audio samples. Multichannel audio will be downmixed.
-#         sr : int
-#             Sample rate of the audio samples. The audio will be resampled if
-#             the sample rate is not 16 kHz, which is expected by the model.
-#         center : boolean
-#             - If `True` (default), the signal `audio` is padded so that frame
-#             `D[:, t]` is centered at `audio[t * hop_length]`.
-#             - If `False`, then `D[:, t]` begins at `audio[t * hop_length]`
-#         step_size : int
-#             The step size in seconds for running pitch estimation.
-
-#         Returns
-#         -------
-#         frames : np.ndarray [shape=(B, T, 1024)]
-#         """
-#         # if len(audio.shape) == 3:
-#         #     audio = audio.mean(-1)  # make mono
-#         # audio = audio.float()
-
-#         # if self.center:
-#         #     audio = F.pad(
-#         #         audio,
-#         #         [self.frame_duration_n//2, self.frame_duration_n//2],
-#         #         mode='constant', value=0)
-
-#         # must clone to remove shared memory after unfolding with overlap
-#         # otherwise the normalization goes wrong
-#         frames = audio.unfold(-1, self.frame_duration_n, self.hop_length_n).clone()
-
-#         # normalize each frame -- this is expected by the model
-#         if self.normalize:
-#             # frames = frames - frames.mean(dim=-1, keepdim=True)
-#             # frames = frames / (frames.std(dim=-1, keepdim=True) + 1e-6)
-#             torch.sub(frames, frames.mean(dim=-1, keepdim=True), out=frames)
-#             torch.div(frames, (frames.std(dim=-1, keepdim=True) + 1e-6), out=frames)
-#         return frames
-
-#     def midi_to_hz(self, midi_pitches: torch.IntTensor) -> torch.Tensor:
-#         return self.a4_frequency_hz * (  # type: ignore
-#             2.0 ** ((midi_pitches - 69.0) / 12.0)
-#         )  # type: ignore
-
-#     def make_targets(
-#         self, samples: torch.Tensor, pitches_midi: torch.IntTensor
-#     ) -> torch.Tensor:
-#         pitches_hz = self.midi_to_hz(pitches_midi)
-#         pitches_cents = self.hertz_to_cents(pitches_hz)
-#         pitches_cents_bins = self.cents_to_bins(pitches_cents)
-
-#         n_frames_in_sample = self.num_frames_in_samples(samples[0][None])
-#         batch_size = samples.shape[0]
-#         pitches_cents_bins_per_frame = (
-#             pitches_cents_bins.unsqueeze(1).expand(batch_size, n_frames_in_sample, -1)
-#         ).clone()
-#         return pitches_cents_bins_per_frame
 
 
 def build_and_load_model(model_capacity: str):
@@ -503,18 +289,14 @@ def build_and_load_model(model_capacity: str):
         package_dir = os.path.dirname(os.path.realpath(__file__))
         filename = "model-{}.h5".format(model_capacity)
         model.load_keras_weights(os.path.join(package_dir, filename))
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = model.to(device)
         model.eval()
+
+        if torch.cuda.is_available():
+            device = torch.device(torch.cuda.current_device())
+        else:
+            device = torch.device("cpu")
+
+        model = model.to(device)
         models[model_capacity] = model
 
     return models[model_capacity]
-
-
-# if __name__ == "__main__":
-#     import torch
-
-#     device = "cpu"
-#     model = build_and_load_model("tiny")
-#     model(torch.randn(size=(1, 1, 1024)).to("cuda"))
