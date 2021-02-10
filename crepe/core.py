@@ -284,8 +284,17 @@ def get_activation(audio, sr, model_capacity='full', center=True, step_size=10,
         import torch
 
         audio = torch.from_numpy(audio)
-        if len(audio.shape) < 2:
-            audio = audio.view((1, -1))
+        if len(audio.shape) == 1:
+            # add batch dimension
+            audio = audio.unsqueeze(0)
+            # add batch dimension
+            audio = audio.unsqueeze(-1)
+        elif len(audio.shape) == 2:
+            # add batch dimension
+            audio = audio.unsqueeze(0)
+        else:
+            raise Exception("Only 1D and 2D signals are supported")
+
         device = next(iter(model.parameters())).device
         audio = audio.to(device)
 
