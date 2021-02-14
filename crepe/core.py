@@ -9,20 +9,23 @@ from scipy.io import wavfile
 import numpy as np
 from numpy.lib.stride_tricks import as_strided
 
-backends = ['tf', 'torch']
+backends = ["tf", "torch"]
 
 # store as a global variable, since we only support a few models for now
-models = {backend: {
-    'tiny': None,
-    'small': None,
-    'medium': None,
-    'large': None,
-    'full': None}
-          for backend in backends
+models = {
+    backend: {"tiny": None, "small": None, "medium": None, "large": None, "full": None}
+    for backend in backends
 }
 
 # the model is trained on 16kHz audio
 model_srate = 16000
+
+
+def clear_model_cache():
+    global models
+    for _, bmodels in models.items():
+        for size in bmodels.keys():
+            bmodels[size] = None
 
 
 def build_and_load_model_tf(model_capacity: str):
@@ -44,15 +47,17 @@ def build_and_load_model_tf(model_capacity: str):
     model : tensorflow.keras.models.Model
         The pre-trained model loaded in memory
     """
-    from tensorflow.keras.layers import (Input, Reshape, Conv2D,
-                                         BatchNormalization)
-    from tensorflow.keras.layers import (MaxPool2D, Dropout, Permute, Flatten,
-                                         Dense)
+    from tensorflow.keras.layers import Input, Reshape, Conv2D, BatchNormalization
+    from tensorflow.keras.layers import MaxPool2D, Dropout, Permute, Flatten, Dense
     from tensorflow.keras.models import Model
 
-    if models['tf'][model_capacity] is None:
+    if models["tf"][model_capacity] is None:
         capacity_multiplier = {
-            'tiny': 4, 'small': 8, 'medium': 16, 'large': 24, 'full': 32
+            "tiny": 4,
+            "small": 8,
+            "medium": 16,
+            "large": 24,
+            "full": 32,
         }[model_capacity]
 
         layers = [1, 2, 3, 4, 5, 6]
@@ -60,32 +65,42 @@ def build_and_load_model_tf(model_capacity: str):
         widths = [512, 64, 64, 64, 64, 64]
         strides = [(4, 1), (1, 1), (1, 1), (1, 1), (1, 1), (1, 1)]
 
-        x = Input(shape=(1024,), name='input', dtype='float32')
-        y = Reshape(target_shape=(1024, 1, 1), name='input-reshape')(x)
+        x = Input(shape=(1024,), name="input", dtype="float32")
+        y = Reshape(target_shape=(1024, 1, 1), name="input-reshape")(x)
 
         for l, f, w, s in zip(layers, filters, widths, strides):
-            y = Conv2D(f, (w, 1), strides=s, padding='same',
-                       activation='relu', name="conv%d" % l)(y)
+            y = Conv2D(
+                f,
+                (w, 1),
+                strides=s,
+                padding="same",
+                activation="relu",
+                name="conv%d" % l,
+            )(y)
             y = BatchNormalization(name="conv%d-BN" % l)(y)
-            y = MaxPool2D(pool_size=(2, 1), strides=None, padding='valid',
-                          name="conv%d-maxpool" % l)(y)
+            y = MaxPool2D(
+                pool_size=(2, 1),
+                strides=None,
+                padding="valid",
+                name="conv%d-maxpool" % l,
+            )(y)
             y = Dropout(0.25, name="conv%d-dropout" % l)(y)
 
         y = Permute((2, 1, 3), name="transpose")(y)
         y = Flatten(name="flatten")(y)
-        y = Dense(360, activation='sigmoid', name="classifier")(y)
+        y = Dense(360, activation="sigmoid", name="classifier")(y)
 
         model = Model(inputs=x, outputs=y)
 
         package_dir = os.path.dirname(os.path.realpath(__file__))
         filename = "model-{}.h5".format(model_capacity)
         model.load_weights(os.path.join(package_dir, filename))
-        model.compile('adam', 'binary_crossentropy')
+        model.compile("adam", "binary_crossentropy")
 
-        models['tf'][model_capacity] = model
+        models["tf"][model_capacity] = model
 
 
-def build_and_load_model(model_capacity: str, backend: str = 'tf'):
+def build_and_load_model(model_capacity: str, backend: str = "tf"):
     """
     Build the CNN model and load the weights
 
@@ -105,17 +120,19 @@ def build_and_load_model(model_capacity: str, backend: str = 'tf'):
         The pre-trained model loaded in memory using the chosen backend
     """
     if models[backend][model_capacity] is None:
-        if backend == 'tf':
+        if backend == "tf":
             build_and_load_model_tf(model_capacity)
-        elif backend == 'torch':
-            from .torch_backend import build_and_load_model \
-                as build_and_load_model_torch
+        elif backend == "torch":
+            from .torch_backend import (
+                build_and_load_model as build_and_load_model_torch,
+            )
+
             model = build_and_load_model_torch(model_capacity)
-            models['torch'][model_capacity] = model
+            models["torch"][model_capacity] = model
         else:
             raise ValueError(
-                f"Unexpected backend {backend}, possible choices are: "
-                f"{backends}")
+                f"Unexpected backend {backend}, possible choices are: " f"{backends}"
+            )
     return models[backend][model_capacity]
 
 
@@ -133,10 +150,11 @@ def to_local_average_cents(salience, center=None):
     """
     find the weighted average cents near the argmax bin
     """
-    if not hasattr(to_local_average_cents, 'cents_mapping'):
+    if not hasattr(to_local_average_cents, "cents_mapping"):
         # the bin number-to-cents mapping
         to_local_average_cents.cents_mapping = (
-            np.linspace(0, 7180, 360) + 1997.3794084376191)
+            np.linspace(0, 7180, 360) + 1997.3794084376191
+        )
 
     if salience.ndim == 1:
         if center is None:
@@ -144,13 +162,13 @@ def to_local_average_cents(salience, center=None):
         start = max(0, center - 4)
         end = min(len(salience), center + 5)
         salience = salience[start:end]
-        product_sum = np.sum(
-            salience * to_local_average_cents.cents_mapping[start:end])
+        product_sum = np.sum(salience * to_local_average_cents.cents_mapping[start:end])
         weight_sum = np.sum(salience)
         return product_sum / weight_sum
     if salience.ndim == 2:
-        return np.array([to_local_average_cents(salience[i, :]) for i in
-                        range(salience.shape[0])])
+        return np.array(
+            [to_local_average_cents(salience[i, :]) for i in range(salience.shape[0])]
+        )
 
     raise Exception("label should be either 1d or 2d ndarray")
 
@@ -173,20 +191,28 @@ def to_viterbi_cents(salience):
     # emission probability = fixed probability for self, evenly distribute the
     # others
     self_emission = 0.1
-    emission = (np.eye(360) * self_emission + np.ones(shape=(360, 360)) *
-                ((1 - self_emission) / 360))
+    emission = np.eye(360) * self_emission + np.ones(shape=(360, 360)) * (
+        (1 - self_emission) / 360
+    )
 
     # fix the model parameters because we are not optimizing the model
     model = hmm.MultinomialHMM(360, starting, transition)
-    model.startprob_, model.transmat_, model.emissionprob_ = \
-        starting, transition, emission
+    model.startprob_, model.transmat_, model.emissionprob_ = (
+        starting,
+        transition,
+        emission,
+    )
 
     # find the Viterbi path
     observations = np.argmax(salience, axis=1)
     path = model.predict(observations.reshape(-1, 1), [len(observations)])
 
-    return np.array([to_local_average_cents(salience[i, :], path[i]) for i in
-                     range(len(observations))])
+    return np.array(
+        [
+            to_local_average_cents(salience[i, :], path[i])
+            for i in range(len(observations))
+        ]
+    )
 
 
 def get_frames(audio, sr, center=True, step_size=10, normalize: bool = True):
@@ -216,20 +242,23 @@ def get_frames(audio, sr, center=True, step_size=10, normalize: bool = True):
     if sr != model_srate:
         # resample audio if necessary
         from resampy import resample
+
         audio = resample(audio, sr, model_srate)
 
     # pad so that frames are centered around their timestamps (i.e. first frame
     # is zero centered).
     if center:
-        audio = np.pad(audio, 512, mode='constant', constant_values=0)
+        audio = np.pad(audio, 512, mode="constant", constant_values=0)
 
     # make 1024-sample frames of the audio with hop length of 10 milliseconds
     hop_length = int(model_srate * step_size / 1000)
     n_frames = 1 + int((len(audio) - 1024) / hop_length)
-    frames = as_strided(audio, shape=(1024, n_frames),
-                        strides=(audio.itemsize, hop_length * audio.itemsize),
-                        writeable=False
-                        ).copy()
+    frames = as_strided(
+        audio,
+        shape=(1024, n_frames),
+        strides=(audio.itemsize, hop_length * audio.itemsize),
+        writeable=False,
+    ).copy()
     frames = frames.transpose()
 
     if normalize:
@@ -239,8 +268,15 @@ def get_frames(audio, sr, center=True, step_size=10, normalize: bool = True):
     return frames
 
 
-def get_activation(audio, sr, model_capacity='full', center=True, step_size=10,
-                   verbose=1, backend: str = 'tf'):
+def get_activation(
+    audio,
+    sr,
+    model_capacity="full",
+    center=True,
+    step_size=10,
+    verbose=1,
+    backend: str = "tf",
+):
     """
 
     Parameters
@@ -270,29 +306,22 @@ def get_activation(audio, sr, model_capacity='full', center=True, step_size=10,
     """
     model = build_and_load_model(model_capacity, backend=backend)
 
-    if backend == 'tf':
-        frames = get_frames(audio, sr, center=center, step_size=step_size)
-        # run prediction and convert the frequency bin weights to Hz
-        activation = model.predict(frames, verbose=verbose)
-    elif backend == 'torch':
-        assert center == model.center
-        assert step_size == 1000 * model.hop_length_s
-        if sr != model.fs_hz:
-            raise NotImplementedError(
-                "Resampling not supported in Torch backend")
-
-        import torch
-        model.eval()
-        with torch.no_grad():
-            logits = model.forward_audio(audio)
-            activation = torch.sigmoid(logits)
-
+    frames = get_frames(audio, sr, center=center, step_size=step_size)
+    # run prediction and convert the frequency bin weights to Hz
+    activation = model.predict(frames, verbose=verbose)
     return activation
 
 
-def predict(audio, sr, model_capacity='full',
-            viterbi=False, center=True, step_size=10, verbose=1,
-            backend: str = 'tf'):
+def predict(
+    audio,
+    sr,
+    model_capacity="full",
+    viterbi=False,
+    center=True,
+    step_size=10,
+    verbose=1,
+    backend: str = "tf",
+):
     """
     Perform pitch estimation on given audio
 
@@ -331,10 +360,16 @@ def predict(audio, sr, model_capacity='full',
         activation: np.ndarray [shape=(T, 360)]
             The raw activation matrix
     """
-    activation = get_activation(audio, sr, model_capacity=model_capacity,
-                                center=center, step_size=step_size,
-                                verbose=verbose, backend=backend)
-    if backend == 'tf':
+    activation = get_activation(
+        audio,
+        sr,
+        model_capacity=model_capacity,
+        center=center,
+        step_size=step_size,
+        verbose=verbose,
+        backend=backend,
+    )
+    if True:  # backend == "tf":
         confidence = activation.max(axis=1)
 
         if viterbi:
@@ -346,21 +381,23 @@ def predict(audio, sr, model_capacity='full',
         frequency[np.isnan(frequency)] = 0
 
         time = np.arange(confidence.shape[0]) * step_size / 1000.0
-    elif backend == 'torch':
-        if viterbi:
-            raise NotImplementedError(
-                "Viterbi decoding not yet implemented in PyTorch")
-        model = build_and_load_model(model_capacity, 'torch')
-        time, frequency, confidence = model.data_helper.interpret_activation(
-            activation)
 
     return time, frequency, confidence, activation
 
 
-def process_file(file, output=None, model_capacity='full', viterbi=False,
-                 center=True, save_activation=False, save_plot=False,
-                 plot_voicing=False, step_size=10, verbose=True,
-                 backend: str = 'tf'):
+def process_file(
+    file,
+    output=None,
+    model_capacity="full",
+    viterbi=False,
+    center=True,
+    save_activation=False,
+    save_plot=False,
+    plot_voicing=False,
+    step_size=10,
+    verbose=True,
+    backend: str = "tf",
+):
     """
     Use the input model to perform pitch estimation on the input file.
 
@@ -404,47 +441,48 @@ def process_file(file, output=None, model_capacity='full', viterbi=False,
         print("CREPE: Could not read %s" % file, file=sys.stderr)
         raise
 
-    if backend == 'torch':
-        import torch
-        # batch input
-        audio = torch.as_tensor(audio).unsqueeze(0)
-        # send to GPU if available
-        device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-        audio = audio.to(device)
-
     time, frequency, confidence, activation = predict(
-        audio, sr,
+        audio,
+        sr,
         model_capacity=model_capacity,
         center=center,
         viterbi=viterbi,
         step_size=step_size,
         verbose=1 * verbose,
-        backend=backend)
+        backend=backend,
+    )
 
-    if backend == 'torch':
-        time, frequency, confidence, activation = (
-            time[0].cpu().numpy(),
-            frequency[0].cpu().numpy(),
-            confidence[0].cpu().numpy(),
-            activation[0].cpu().numpy()
-        )
+    # if backend == "torch":
+    #     time, frequency, confidence, activation = (
+    #         time[0].cpu().numpy(),
+    #         frequency[0].cpu().numpy(),
+    #         confidence[0].cpu().numpy(),
+    #         activation[0].cpu().numpy(),
+    #     )
 
     # write prediction as TSV
     f0_file = output_path(file, ".f0.csv", output)
     f0_data = np.vstack([time, frequency, confidence]).transpose()
-    np.savetxt(f0_file, f0_data, fmt=['%.3f', '%.3f', '%.6f'], delimiter=',',
-               header='time,frequency,confidence', comments='')
+    np.savetxt(
+        f0_file,
+        f0_data,
+        fmt=["%.3f", "%.3f", "%.6f"],
+        delimiter=",",
+        header="time,frequency,confidence",
+        comments="",
+    )
     if verbose:
-        print("CREPE: Saved the estimated frequencies and confidence values "
-              "at {}".format(f0_file))
+        print(
+            "CREPE: Saved the estimated frequencies and confidence values "
+            "at {}".format(f0_file)
+        )
 
     # save the salience file to a .npy file
     if save_activation:
         activation_path = output_path(file, ".activation.npy", output)
         np.save(activation_path, activation)
         if verbose:
-            print("CREPE: Saved the activation matrix at {}".format(
-                activation_path))
+            print("CREPE: Saved the activation matrix at {}".format(activation_path))
 
     # save the salience visualization in a PNG file
     if save_plot:
@@ -454,16 +492,17 @@ def process_file(file, output=None, model_capacity='full', viterbi=False,
         plot_file = output_path(file, ".activation.png", output)
         # to draw the low pitches in the bottom
         salience = np.flip(activation, axis=1)
-        inferno = matplotlib.cm.get_cmap('inferno')
+        inferno = matplotlib.cm.get_cmap("inferno")
         image = inferno(salience.transpose())
 
         if plot_voicing:
             # attach a soft and hard voicing detection result under the
             # salience plot
-            image = np.pad(image, [(0, 20), (0, 0), (0, 0)], mode='constant')
+            image = np.pad(image, [(0, 20), (0, 0), (0, 0)], mode="constant")
             image[-20:-10, :, :] = inferno(confidence)[np.newaxis, :, :]
-            image[-10:, :, :] = (
-                inferno((confidence > 0.5).astype(np.float))[np.newaxis, :, :])
+            image[-10:, :, :] = inferno((confidence > 0.5).astype(np.float))[
+                np.newaxis, :, :
+            ]
 
         imwrite(plot_file, (255 * image).astype(np.uint8))
         if verbose:
